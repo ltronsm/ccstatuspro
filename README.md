@@ -42,18 +42,18 @@ The thing that doesn't exist anywhere else, as far as I've found:
 ### Line 2 — 5-hour rate-limit block
 
 ```
-Usage: ███ ▌ 2.6M / 15.3M ▐ ░░░  17%  ⏱ 4h04m  ⟳ 6:00pm
-       └──────────┬──────────┘  └┬┘  └──┬──┘  └──┬───┘
-                  │              │      │        │
-            usage bar      percentage  countdown  wall-clock
+Usage: ███ ▌ 2.6M / 15.3M ▐ ░░░  17%  Resets in 4 hr 33 min  ⟳ 18:00
+       └──────────┬──────────┘  └┬┘  └──────────┬─────────┘  └──┬──┘
+                  │              │              │               │
+            usage bar      percentage       countdown       wall-clock
 ```
 
 | Segment | What it tells you |
 |---|---|
 | `▌ 2.6M / 15.3M ▐` | **Used / quota**. Used = billable token sum (input + output + cache-creation) across every session in the last 5 hours, scanned from `~/.claude/projects/**/*.jsonl`. Quota = back-calculated from `used / pct` since Anthropic doesn't publish it directly. |
-| `17%` | The authoritative 5-hour utilization from Claude Code (passed via stdin) or the `oauth/usage` API (cached 5 min, fallback). |
-| `⏱ 4h04m` | **Countdown** until the 5-hour block resets. Computed from the earliest user message in the last 5 hours + 5h. |
-| `⟳ 6:00pm` | **Wall-clock time** the block resets, in your local timezone. |
+| `17%` | The 5-hour utilization, passed directly by Claude Code on stdin. |
+| `Resets in 4 hr 33 min` | **Countdown** until the 5-hour block resets, from `resets_at` on stdin. |
+| `⟳ 18:00` | **Wall-clock time** the block resets — 24-hour, in your local timezone. |
 
 ### Color thresholds (both bars)
 
@@ -81,8 +81,8 @@ Usage: ███ ▌ 2.6M / 15.3M ▐ ░░░  17%  ⏱ 4h04m  ⟳ 6:00pm
 | Model name, cwd, session duration | stdin JSON from Claude Code | always available, cheap |
 | Git branch + dirty | `git -C "$cwd" symbolic-ref` + `status --porcelain` | local, fast |
 | Context tokens used | last `message.usage` row in `transcript_path` | the only place with current-session token totals |
-| 5h percentage | `rate_limits.five_hour.used_percentage` from stdin (newer Claude Code) → falls back to `oauth/usage` API (cached 5 min) | stdin is fast and free; API is the fallback |
-| 5h reset time | `rate_limits.five_hour.resets_at` from stdin → API → **local computation** from JSONL | local computation is the most reliable: not subject to API rate limits |
+| 5h percentage | `rate_limits.five_hour.used_percentage` from stdin | passed directly by Claude Code; no API call |
+| 5h reset time | `rate_limits.five_hour.resets_at` from stdin (unix epoch or ISO) → **local estimate** (block start + 5h) only if stdin omits it | stdin is authoritative and never rate-limits |
 | 5h tokens used (overlay) | `jq -s` over all `~/.claude/projects/**/*.jsonl` files, summing `input + output + cache_creation` for assistant messages in the last 5h | only source of an actual token count; also gives us the block start timestamp for the reset calculation |
 
 ### The bar overlay
@@ -104,9 +104,9 @@ Earlier versions called `oauth/usage` every second to fetch `resets_at`. At 1 re
 { "error": { "type": "rate_limit_error", "message": "Rate limited. Please try again later." } }
 ```
 
-…and the reset time goes blank, which silently truncates line 2.
+…and the cached fallback goes stale, so the reset time silently drifts to a wrong value.
 
-The fix: scan JSONL session logs for the earliest user-message timestamp in the last 5 hours, add 5 hours, that's the reset. Anthropic's 5-hour rolling window starts on your first message after a quiet period, so this matches the official number to within seconds. No API dependency, no rate limit risk.
+The fix: Claude Code already hands the statusline `rate_limits.five_hour.resets_at` on stdin (a unix epoch), so it reads that directly — no API call, no rate limit, always current. Only if stdin omits the field does it fall back to a local estimate (earliest user message in the last 5 hours + 5h), which is rough once you're past 5h of continuous use but better than a blank segment.
 
 ---
 
