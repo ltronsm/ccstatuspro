@@ -2,11 +2,7 @@
 
 A focused, opinionated Claude Code status line. Two lines, no TUI, no widget zoo — just the four numbers I actually look at while coding: **session context, 5-hour quota, time until reset, git state**. Updates every second so you always know how close you are to the wall.
 
-```
-[opus-4.6·1M] │ agent-roc (main*) │ ⏱ 4m │ ████ ▌ 281k / 1M ▐ ░░░░░ 28%
-
-Usage: ███ ▌ 2.6M / 15.3M ▐ ░░░  17%  ⏱ 4h04m  ⟳ 6:00pm
-```
+<img width="854" height="274" alt="screenshot" src="https://github.com/user-attachments/assets/d2c7ed11-5c3b-4d36-b902-ee9de8272520" />
 
 ---
 
