@@ -1,0 +1,397 @@
+#!/bin/bash
+# Claude Code status line — custom.
+# Reads session JSON on stdin, prints two colored lines.
+# Line 1: model · cwd (branch*) · session time · context %
+# Line 2: 5-hour block bar with token count overlaid · reset time
+# Pseudo-blinks the bar at >=95% by toggling red each second
+# (Apple Terminal ignores real ANSI blink — refreshInterval=1 drives the toggle).
+set -f
+
+input=$(cat)
+if [ -z "$input" ]; then
+    printf "Claude"
+    exit 0
+fi
+
+# ── Colors (truecolor RGB) ──────────────────────────────
+blue=$'\033[38;2;0;153;255m'
+orange=$'\033[38;2;255;176;85m'
+green=$'\033[38;2;0;175;80m'
+cyan=$'\033[38;2;86;182;194m'
+red=$'\033[38;2;255;85;85m'
+red_bright=$'\033[1;38;2;255;30;30m'
+white=$'\033[38;2;220;220;220m'
+dim=$'\033[2m'
+reset=$'\033[0m'
+
+# Backgrounds (for bar overlay)
+bg_orange=$'\033[48;2;150;90;30m'
+bg_red=$'\033[48;2;140;35;35m'
+bg_red_bright=$'\033[48;2;200;20;20m'
+bg_dim=$'\033[48;2;55;55;55m'
+fg_dim=$'\033[38;2;90;90;90m'
+fg_white_bold=$'\033[1;38;2;255;255;255m'
+
+sep=" ${dim}│${reset} "
+
+now_epoch=$(date +%s)
+flash_even=$(( now_epoch % 2 ))  # 0 or 1
+
+# ── Threshold color helpers ─────────────────────────────
+color_for_pct() {
+    local pct=$1
+    if [ "$pct" -ge 95 ] 2>/dev/null; then
+        if [ "$flash_even" -eq 0 ]; then printf "%s" "$red_bright"; else printf "%s" "$red"; fi
+    elif [ "$pct" -ge 85 ] 2>/dev/null; then
+        printf "%s" "$red"
+    else
+        printf "%s" "$orange"
+    fi
+}
+bg_for_pct() {
+    local pct=$1
+    if [ "$pct" -ge 95 ] 2>/dev/null; then
+        if [ "$flash_even" -eq 0 ]; then printf "%s" "$bg_red_bright"; else printf "%s" "$bg_red"; fi
+    elif [ "$pct" -ge 85 ] 2>/dev/null; then
+        printf "%s" "$bg_red"
+    else
+        printf "%s" "$bg_orange"
+    fi
+}
+
+# ── Bar with overlaid text ──────────────────────────────
+# Args: pct width text
+build_bar() {
+    local pct=$1 width=$2 text="${3:-}"
+    [ "$pct" -lt 0 ] 2>/dev/null && pct=0
+    [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+    local filled=$(( pct * width / 100 ))
+    local bar_fg bar_bg
+    bar_fg=$(color_for_pct "$pct")
+    bar_bg=$(bg_for_pct "$pct")
+
+    # No overlay — simple bar
+    if [ -z "$text" ]; then
+        local fs="" es=""
+        local i
+        for ((i=0; i<filled; i++)); do fs+="█"; done
+        for ((i=0; i<width-filled; i++)); do es+="░"; done
+        printf "%s%s%s%s%s" "$bar_fg" "$fs" "$fg_dim" "$es" "$reset"
+        return
+    fi
+
+    # Center the text
+    local text_len=${#text}
+    local text_start=$(( (width - text_len) / 2 ))
+    [ $text_start -lt 0 ] && text_start=0
+    local text_end=$(( text_start + text_len ))
+    [ $text_end -gt $width ] && text_end=$width
+
+    local out="" ch i
+    for ((i=0; i<width; i++)); do
+        local is_filled=0
+        [ $i -lt $filled ] && is_filled=1
+        if [ $i -ge $text_start ] && [ $i -lt $text_end ]; then
+            ch="${text:$((i - text_start)):1}"
+            if [ $is_filled -eq 1 ]; then
+                out+="${fg_white_bold}${bar_bg}${ch}"
+            else
+                out+="${fg_white_bold}${bg_dim}${ch}"
+            fi
+        else
+            if [ $is_filled -eq 1 ]; then
+                out+="${bar_fg}${bar_bg}█"
+            else
+                out+="${fg_dim}${bg_dim}░"
+            fi
+        fi
+    done
+    out+="${reset}"
+    printf "%s" "$out"
+}
+
+# ── Formatters ──────────────────────────────────────────
+fmt_k() {
+    local n=$1
+    if [ "$n" -ge 1000000 ] 2>/dev/null; then
+        # Show "1M" not "1.0M"; keep one decimal only when non-zero.
+        awk "BEGIN {
+            m = $n / 1000000
+            if (m == int(m)) printf \"%dM\", m
+            else printf \"%.1fM\", m
+        }"
+    elif [ "$n" -ge 1000 ] 2>/dev/null; then
+        printf "%dk" $((n / 1000))
+    else
+        printf "%d" "$n"
+    fi
+}
+format_epoch_time() {
+    local epoch=$1
+    [ -z "$epoch" ] || [ "$epoch" = "null" ] || [ "$epoch" = "0" ] && return
+    local result
+    result=$(date -j -r "$epoch" +"%l:%M%p" 2>/dev/null)
+    [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null)
+    result=$(printf "%s" "$result" | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
+    printf "%s" "$result"
+}
+iso_to_epoch() {
+    local s="$1"
+    local e
+    e=$(date -d "$s" +%s 2>/dev/null)
+    [ -n "$e" ] && { echo "$e"; return; }
+    local stripped="${s%%.*}"
+    stripped="${stripped%Z}"
+    stripped="${stripped%%+*}"
+    e=$(env TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
+    [ -n "$e" ] && echo "$e"
+}
+
+# ── Parse stdin ─────────────────────────────────────────
+model_name=$(printf "%s" "$input" | jq -r '.model.display_name // .model.id // "claude"')
+model_id=$(printf "%s" "$input" | jq -r '.model.id // ""')
+cwd=$(printf "%s" "$input" | jq -r '.workspace.current_dir // .cwd // empty')
+[ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
+transcript=$(printf "%s" "$input" | jq -r '.transcript_path // empty')
+duration_ms=$(printf "%s" "$input" | jq -r '.cost.total_duration_ms // 0')
+
+shorten_model() {
+    local m="$1"
+    case "$m" in
+        *Opus*4.6*1M*|*opus*4-6*1m*|*opus-4-6*1m*) echo "opus-4.6·1M" ;;
+        *Opus*4.6*|*opus*4-6*|*opus-4-6*)           echo "opus-4.6" ;;
+        *Sonnet*4.6*|*sonnet*4-6*|*sonnet-4-6*)     echo "sonnet-4.6" ;;
+        *Haiku*4.5*|*haiku*4-5*|*haiku-4-5*)        echo "haiku-4.5" ;;
+        *Opus*4.5*)   echo "opus-4.5" ;;
+        *Sonnet*4.5*) echo "sonnet-4.5" ;;
+        *) printf '%s' "$m" ;;
+    esac
+}
+model_short=$(shorten_model "$model_name")
+
+ctx_max=200000
+if [[ "$model_name$model_id" == *"1M"* || "$model_name$model_id" == *"1m"* ]]; then
+    ctx_max=1000000
+fi
+
+dirname=$(basename "$cwd")
+
+# Git
+git_branch=""; git_dirty=""
+if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
+    if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
+        git_dirty="*"
+    fi
+fi
+
+# Session duration
+s=$(( duration_ms / 1000 ))
+if [ $s -ge 3600 ]; then
+    session_duration="$((s/3600))h$(( (s%3600)/60 ))m"
+elif [ $s -ge 60 ]; then
+    session_duration="$((s/60))m"
+else
+    session_duration="${s}s"
+fi
+
+# Context % from transcript — defaults to 0 so the bar is visible at session
+# start, before any assistant usage has been recorded in the transcript.
+ctx_pct=0
+ctx_used=0
+if [ -n "$transcript" ] && [ -f "$transcript" ]; then
+    last_usage=$(tail -r "$transcript" 2>/dev/null | grep -m1 '"usage"')
+    if [ -n "$last_usage" ]; then
+        ctx_used=$(printf "%s" "$last_usage" | jq -r '
+            (.message.usage.input_tokens // 0)
+            + (.message.usage.cache_read_input_tokens // 0)
+            + (.message.usage.cache_creation_input_tokens // 0)' 2>/dev/null)
+        if [ -n "$ctx_used" ] && [ "$ctx_used" -gt 0 ] 2>/dev/null; then
+            ctx_pct=$((ctx_used * 100 / ctx_max))
+        fi
+    fi
+fi
+
+# ── Rate limits (5-hour) — fresh every tick, no cache ──
+# Curl runs synchronously on every render (refreshInterval=1 in settings),
+# so the bar reflects token burn from OTHER terminals in real time.
+# --max-time 2 bounds worst-case render when the API is slow.
+five_hour_pct=""
+five_hour_reset_epoch=""
+
+# Stdin may carry rate_limits (newer Claude Code versions). Take whatever
+# stdin provides, then fall through to the API for any missing field —
+# stdin sometimes supplies used_percentage without resets_at, which was
+# why the reset-time segment was going missing.
+stdin_five_pct=$(printf "%s" "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+stdin_five_reset=$(printf "%s" "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+if [ -n "$stdin_five_pct" ]; then
+    five_hour_pct=$(printf "%.0f" "$stdin_five_pct")
+fi
+if [ -n "$stdin_five_reset" ]; then
+    five_hour_reset_epoch=$(iso_to_epoch "$stdin_five_reset")
+fi
+
+if [ -z "$five_hour_pct" ] || [ -z "$five_hour_reset_epoch" ]; then
+    # Cache the API response for 5 min. resets_at only changes every 5 hours,
+    # so a long TTL is safe — and it prevents 429s from hitting Anthropic's
+    # usage endpoint when refreshInterval=1 fires every second.
+    cache_dir="/tmp/claude"
+    mkdir -p "$cache_dir" 2>/dev/null
+    usage_cache="$cache_dir/statusline-usage-cache.json"
+    usage_max_age=300
+
+    need_fetch=true
+    if [ -f "$usage_cache" ]; then
+        cm=$(stat -f %m "$usage_cache" 2>/dev/null || stat -c %Y "$usage_cache" 2>/dev/null)
+        [ $(( now_epoch - cm )) -lt $usage_max_age ] && need_fetch=false
+    fi
+
+    usage_data=""
+    if $need_fetch; then
+        token=""
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            token="$CLAUDE_CODE_OAUTH_TOKEN"
+        elif command -v security >/dev/null 2>&1; then
+            blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+            [ -n "$blob" ] && token=$(printf "%s" "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+        fi
+        if [ -z "$token" ] || [ "$token" = "null" ]; then
+            creds_file="$HOME/.claude/.credentials.json"
+            [ -f "$creds_file" ] && token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
+        fi
+        if [ -n "$token" ] && [ "$token" != "null" ]; then
+            response=$(curl -s --max-time 2 \
+                -H "Accept: application/json" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $token" \
+                -H "anthropic-beta: oauth-2025-04-20" \
+                -H "User-Agent: claude-code/2.1.34" \
+                "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+            # Only overwrite cache on a valid response — preserves the
+            # previous good data across transient 429s / network blips.
+            if [ -n "$response" ] && printf "%s" "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
+                usage_data="$response"
+                printf "%s" "$response" > "$usage_cache.tmp" && mv "$usage_cache.tmp" "$usage_cache"
+            fi
+        fi
+        [ -z "$usage_data" ] && [ -f "$usage_cache" ] && usage_data=$(cat "$usage_cache" 2>/dev/null)
+    else
+        usage_data=$(cat "$usage_cache" 2>/dev/null)
+    fi
+
+    if [ -n "$usage_data" ] && printf "%s" "$usage_data" | jq -e '.five_hour' >/dev/null 2>&1; then
+        if [ -z "$five_hour_pct" ]; then
+            five_hour_pct=$(printf "%s" "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
+        fi
+        if [ -z "$five_hour_reset_epoch" ]; then
+            api_reset_iso=$(printf "%s" "$usage_data" | jq -r '.five_hour.resets_at // empty')
+            [ -n "$api_reset_iso" ] && five_hour_reset_epoch=$(iso_to_epoch "$api_reset_iso")
+        fi
+    fi
+fi
+
+# ── Block token count + block start (for overlay + reset) — fresh every tick
+# Scans every session's JSONL synchronously. One jq pass per file produces
+# both the billable-token sum AND the earliest user-message timestamp in
+# the 5-hour window — the latter gives us the block start, which lets us
+# compute reset locally instead of depending on the (rate-limited) API.
+block_tokens=0
+block_start_iso=""
+window=$((5*3600))
+cutoff_epoch=$(( now_epoch - window ))
+cutoff_iso=$(date -u -r "$cutoff_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "@$cutoff_epoch" +"%Y-%m-%dT%H:%M:%SZ")
+while IFS= read -r f; do
+    # Output two lines: tokens on line 1, earliest-user-ts on line 2.
+    # Exclude cache_read — those are reduced-rate reads that would inflate.
+    result=$(jq -s --arg cutoff "$cutoff_iso" '
+        (
+          [.[] | select(.type=="assistant" and .timestamp > $cutoff and .message.usage != null)
+            | (.message.usage.input_tokens // 0)
+            + (.message.usage.output_tokens // 0)
+            + (.message.usage.cache_creation_input_tokens // 0)
+          ] | add // 0
+        ), (
+          [.[] | select(.type=="user" and .timestamp != null and .timestamp > $cutoff)
+            | .timestamp
+          ] | min // ""
+        )' "$f" 2>/dev/null)
+    sum=$(printf "%s" "$result" | sed -n '1p')
+    earliest=$(printf "%s" "$result" | sed -n '2p' | tr -d '"')
+    block_tokens=$(( block_tokens + ${sum:-0} ))
+    if [ -n "$earliest" ] && { [ -z "$block_start_iso" ] || [ "$earliest" \< "$block_start_iso" ]; }; then
+        block_start_iso="$earliest"
+    fi
+done < <(find "$HOME/.claude/projects" -name '*.jsonl' 2>/dev/null)
+
+# Compute reset from block start if the API didn't give us one.
+# block_start + 5h = reset. This is authoritative and never rate-limits.
+if [ -z "$five_hour_reset_epoch" ] && [ -n "$block_start_iso" ]; then
+    block_start_epoch=$(iso_to_epoch "$block_start_iso")
+    if [ -n "$block_start_epoch" ]; then
+        five_hour_reset_epoch=$(( block_start_epoch + 5*3600 ))
+    fi
+fi
+
+# ── Line 1 ──────────────────────────────────────────────
+line1=""
+line1+="${blue}[${model_short}]${reset}"
+line1+="${sep}"
+line1+="${cyan}${dirname}${reset}"
+if [ -n "$git_branch" ]; then
+    line1+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
+fi
+line1+="${sep}"
+line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
+if [ $ctx_pct -ge 0 ]; then
+    line1+="${sep}"
+    ctx_overlay=" ▌ $(fmt_k "$ctx_used") / $(fmt_k "$ctx_max") ▐ "
+    ctx_bar=$(build_bar "$ctx_pct" 24 "$ctx_overlay")
+    pc=$(color_for_pct "$ctx_pct")
+    ctx_pct_fmt=$(printf "%2d" "$ctx_pct")
+    line1+="${ctx_bar} ${pc}${ctx_pct_fmt}%${reset}"
+fi
+
+# ── Line 2 (5h block) ───────────────────────────────────
+line2=""
+if [ -n "$five_hour_pct" ]; then
+    pct_color=$(color_for_pct "$five_hour_pct")
+    reset_time=$(format_epoch_time "$five_hour_reset_epoch")
+    pct_fmt=$(printf "%3d" "$five_hour_pct")
+    overlay=""
+    if [ "$block_tokens" -gt 0 ] 2>/dev/null; then
+        # Back-calculate total quota from known pct+used. MAX = used / (pct/100).
+        # Not Anthropic's authoritative cap (different accounting for cache
+        # reads), but internally consistent with the displayed percentage.
+        if [ "$five_hour_pct" -gt 0 ] 2>/dev/null; then
+            block_max=$(( block_tokens * 100 / five_hour_pct ))
+            overlay=" ▌ $(fmt_k "$block_tokens") / $(fmt_k "$block_max") ▐ "
+        else
+            overlay=" ▌ $(fmt_k "$block_tokens") ▐ "
+        fi
+    fi
+    bar=$(build_bar "$five_hour_pct" 24 "$overlay")
+    # Mid-grey label — brighter than $dim (which is 50%), subtler than $white.
+    line2+=$'\033[38;2;170;170;170m'"Usage:${reset} ${bar} ${pct_color}${pct_fmt}%${reset}"
+
+    # ⏱ countdown (time until reset) + ⟳ wall clock (when it resets).
+    if [ -n "$five_hour_reset_epoch" ]; then
+        remaining=$(( five_hour_reset_epoch - now_epoch ))
+        if [ "$remaining" -gt 0 ]; then
+            rh=$(( remaining / 3600 ))
+            rm=$(( (remaining % 3600) / 60 ))
+            if [ "$rh" -gt 0 ]; then
+                countdown=$(printf "%dh%02dm" "$rh" "$rm")
+            else
+                countdown=$(printf "%dm" "$rm")
+            fi
+            line2+="  ${dim}⏱${reset} ${white}${countdown}${reset}"
+        fi
+    fi
+    [ -n "$reset_time" ] && line2+="  ${dim}⟳${reset} ${white}${reset_time}${reset}"
+fi
+
+# ── Output ──────────────────────────────────────────────
+printf "%s" "$line1"
+[ -n "$line2" ] && printf "\n\n%s" "$line2"
+exit 0
