@@ -114,10 +114,10 @@ The fix: scan JSONL session logs for the earliest user-message timestamp in the 
 
 ### Requirements
 
-- macOS or Linux
-- `bash`, `jq`, `curl`, `git`
+- macOS, Linux, or Windows (run under [Git Bash](https://git-scm.com/downloads/win))
+- `bash`, `jq`, `curl`, `git` — install jq with `brew install jq` (macOS), your package manager (Linux), or `winget install jqlang.jq` (Windows)
 - Claude Code with statusline support (`refreshInterval` field in `settings.json`)
-- A terminal that supports 24-bit color (Apple Terminal, iTerm2, Ghostty, Alacritty, Kitty, etc.)
+- A terminal that supports 24-bit color (Apple Terminal, iTerm2, Ghostty, Alacritty, Kitty, Windows Terminal, etc.)
 
 ### Quick install
 
@@ -162,6 +162,18 @@ The statusline refreshes every second. Apple Terminal's "Active process name" fe
 **Terminal → Settings → Profiles → [your profile] → Window tab → Title** — uncheck **"Active process name"**.
 
 Close and reopen the Terminal window to apply. iTerm2, Ghostty, Alacritty, and Kitty don't have this behaviour by default.
+
+### Windows
+
+The VS Code Claude Code extension runs the statusline through **Git Bash**, so install [Git for Windows](https://git-scm.com/downloads/win) and make sure `jq` is on its PATH:
+
+```powershell
+winget install jqlang.jq
+```
+
+Then run the quick install above from a Git Bash prompt. The script auto-detects Git Bash / WSL and normalizes Windows paths (`cygpath`/`wslpath`).
+
+> **Note:** Windows support is recent and not yet verified on a Windows machine end to end. If the context readout or the Usage-bar token overlay don't render, please [open an issue](https://github.com/ltronsm/ccstatuspro/issues).
 
 ---
 
