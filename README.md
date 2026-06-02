@@ -2,7 +2,7 @@
 
 A focused, opinionated Claude Code status line. Two lines, no TUI, no widget zoo — just the four numbers I actually look at while coding: **session context, 5-hour quota, time until reset, git state**. Updates every second so you always know how close you are to the wall.
 
-<img width="854" height="274" alt="screenshot" src="https://github.com/user-attachments/assets/d2c7ed11-5c3b-4d36-b902-ee9de8272520" />
+<img width="854" height="106" alt="screenshot" src="https://github.com/user-attachments/assets/c1522bf8-a8e0-49ea-91cd-a41bbc089c14" />
 
 ---
 
