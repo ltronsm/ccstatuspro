@@ -135,6 +135,19 @@ format_epoch_time() {
     result=$(printf "%s" "$result" | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
     printf "%s" "$result"
 }
+# Convert a Windows path (C:\… or /c/… ) to a form local bash tools can open.
+# No-op on macOS/Linux where cygpath/wslpath are absent and paths are already POSIX.
+to_unix_path() {
+    local p="$1"
+    [ -z "$p" ] && return
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "$p" 2>/dev/null || printf "%s" "$p"
+    elif command -v wslpath >/dev/null 2>&1; then
+        wslpath -u "$p" 2>/dev/null || printf "%s" "$p"
+    else
+        printf "%s" "$p"
+    fi
+}
 iso_to_epoch() {
     local s="$1"
     local e
@@ -153,6 +166,7 @@ model_id=$(printf "%s" "$input" | jq -r '.model.id // ""')
 cwd=$(printf "%s" "$input" | jq -r '.workspace.current_dir // .cwd // empty')
 [ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
 transcript=$(printf "%s" "$input" | jq -r '.transcript_path // empty')
+transcript=$(to_unix_path "$transcript")
 duration_ms=$(printf "%s" "$input" | jq -r '.cost.total_duration_ms // 0')
 
 shorten_model() {
@@ -200,7 +214,8 @@ fi
 ctx_pct=0
 ctx_used=0
 if [ -n "$transcript" ] && [ -f "$transcript" ]; then
-    last_usage=$(tail -r "$transcript" 2>/dev/null | grep -m1 '"usage"')
+    # Last line containing "usage". (tail -r is BSD-only; this is portable.)
+    last_usage=$(grep '"usage"' "$transcript" 2>/dev/null | tail -n 1)
     if [ -n "$last_usage" ]; then
         ctx_used=$(printf "%s" "$last_usage" | jq -r '
             (.message.usage.input_tokens // 0)
@@ -315,7 +330,7 @@ while IFS= read -r f; do
           [.[] | select(.type=="user" and .timestamp != null and .timestamp > $cutoff)
             | .timestamp
           ] | min // ""
-        )' "$f" 2>/dev/null)
+        )' < "$f" 2>/dev/null)
     sum=$(printf "%s" "$result" | sed -n '1p')
     earliest=$(printf "%s" "$result" | sed -n '2p' | tr -d '"')
     block_tokens=$(( block_tokens + ${sum:-0} ))
