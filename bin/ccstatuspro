@@ -165,6 +165,7 @@ model_name=$(printf "%s" "$input" | jq -r '.model.display_name // .model.id // "
 model_id=$(printf "%s" "$input" | jq -r '.model.id // ""')
 cwd=$(printf "%s" "$input" | jq -r '.workspace.current_dir // .cwd // empty')
 [ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
+cwd=$(to_unix_path "$cwd")
 transcript=$(printf "%s" "$input" | jq -r '.transcript_path // empty')
 transcript=$(to_unix_path "$transcript")
 duration_ms=$(printf "%s" "$input" | jq -r '.cost.total_duration_ms // 0')
@@ -259,10 +260,9 @@ block_start_iso=""
 window=$((5*3600))
 cutoff_epoch=$(( now_epoch - window ))
 cutoff_iso=$(date -u -r "$cutoff_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -d "@$cutoff_epoch" +"%Y-%m-%dT%H:%M:%SZ")
-while IFS= read -r f; do
-    # Output two lines: tokens on line 1, earliest-user-ts on line 2.
-    # Exclude cache_read — those are reduced-rate reads that would inflate.
-    result=$(jq -s --arg cutoff "$cutoff_iso" '
+result=$(find "$HOME/.claude/projects" -name '*.jsonl' -exec cat {} + 2>/dev/null \
+    | jq -Rs --arg cutoff "$cutoff_iso" '
+        [split("\n") | .[] | select(length > 0) | try fromjson] |
         (
           [.[] | select(.type=="assistant" and .timestamp > $cutoff and .message.usage != null)
             | (.message.usage.input_tokens // 0)
@@ -273,14 +273,10 @@ while IFS= read -r f; do
           [.[] | select(.type=="user" and .timestamp != null and .timestamp > $cutoff)
             | .timestamp
           ] | min // ""
-        )' < "$f" 2>/dev/null)
-    sum=$(printf "%s" "$result" | sed -n '1p')
-    earliest=$(printf "%s" "$result" | sed -n '2p' | tr -d '"')
-    block_tokens=$(( block_tokens + ${sum:-0} ))
-    if [ -n "$earliest" ] && { [ -z "$block_start_iso" ] || [ "$earliest" \< "$block_start_iso" ]; }; then
-        block_start_iso="$earliest"
-    fi
-done < <(find "$HOME/.claude/projects" -name '*.jsonl' 2>/dev/null)
+        )' 2>/dev/null)
+block_tokens=$(printf "%s" "$result" | sed -n '1p')
+block_tokens=${block_tokens:-0}
+block_start_iso=$(printf "%s" "$result" | sed -n '2p' | tr -d '"')
 
 # Last-resort reset estimate if stdin didn't carry resets_at: block_start + 5h.
 # Rough — the earliest message in the window drifts once you're past 5h of
